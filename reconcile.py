@@ -15,12 +15,37 @@ from flask import jsonify
 
 import json
 from operator import itemgetter
-import urllib
+import urllib.parse
 from sys import version_info
 
 #For scoring results
 from fuzzywuzzy import fuzz
 import requests
+import lxml.etree as le
+
+# http://wiki.tei-c.org/index.php/Remove-Namespaces.xsl
+xslt='''<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+<xsl:output method="xml" indent="no"/>
+<xsl:template match="/|comment()|processing-instruction()">
+    <xsl:copy>
+      <xsl:apply-templates/>
+    </xsl:copy>
+</xsl:template>
+<xsl:template match="*">
+    <xsl:element name="{local-name()}">
+      <xsl:apply-templates select="@*|node()"/>
+    </xsl:element>
+</xsl:template>
+<xsl:template match="@*">
+    <xsl:attribute name="{local-name()}">
+      <xsl:value-of select="."/>
+    </xsl:attribute>
+</xsl:template>
+</xsl:stylesheet>
+'''
+
+xslt_doc = le.fromstring(xslt)
+transform = le.XSLT(xslt_doc)
 
 app = Flask(__name__)
 
@@ -115,6 +140,16 @@ def make_uri(fast_id):
     return fast_uri
 
 
+def check_obsolete(term):
+    xml = le.parse(term['id'] + '/marc21.xml')
+    xml = transform(xml)
+    if len(xml.xpath('//subfield[contains(string(), "This authority record has been deleted")]')) > 0:
+        print(term["name"])
+        return False
+    else:
+        return True
+
+
 def jsonpify(obj):
     """
     Helper to support JSONP
@@ -141,13 +176,13 @@ def search(raw_query, query_type='/fast/all'):
     query_index = query_type_meta[0]['index']
     try:
         #FAST api requires spaces to be encoded as %20 rather than +
-        url = api_base_url + '?query=' + urllib.quote(query)
+        url = api_base_url + '?query=' + urllib.parse.quote(query)
         url += '&rows=30&queryReturn=suggestall%2Cidroot%2Cauth%2cscore&suggest=autoSubject'
         url += '&queryIndex=' + query_index + '&wt=json'
         app.logger.debug("FAST API url is " + url)
         resp = requests.get(url)
         results = resp.json()
-    except Exception, e:
+    except Exception as e:
         app.logger.warning(e)
         return out
     for position, item in enumerate(results['response']['docs']):
@@ -181,7 +216,9 @@ def search(raw_query, query_type='/fast/all'):
             "match": match,
             "type": query_type_meta
         }
-        out.append(resource)
+        #Check if term is obsolete
+        if check_obsolete(resource):
+            out.append(resource)
     #Sort this list by score
     sorted_out = sorted(out, key=itemgetter('score'), reverse=True)
     #Refine only will handle top three matches.
